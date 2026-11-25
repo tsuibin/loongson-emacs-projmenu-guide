@@ -1,0 +1,20 @@
+# * title #gdb/#term/#pterm#xterm#eval
+# #+workdir: cmd's workdir
+# #+path: path add to path env
+# #+rawcmd: 0 or 1
+# cmd
+# # exec cmd use compile, gdb(#gdb), term(#term), process term(#pterm), shell(#shell), process shell(#pshell), xterm(#xterm), elisp(#eval), eshell(#eshell)
+# # exec cmd's curent dir is projdir or workdir or debuggerdir
+# # default cmds expand $var when var is workdir/WORKDIR, projdir/PROJDIR and other envs, global elisp vars.expand ${{var}} to elisp (eval var).
+# # rawcmd props does not expand $var, ${{var}} in cmds
+
+* build
+** compile
+ make
+** compile in shell #shell
+ make
+** clean
+ make clean
+** cleanall
+ make cleanall
+#+INCLUDE: ~/.emacs.d/mytool/projmenu/.tools.org

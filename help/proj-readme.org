@@ -1,0 +1,586 @@
+#+TITLE: =.proj.el= 使用文档
+
+> 把 =.menu.org=（Org 语法）编译成 Emacs 菜单栏菜单的构建系统。
+> 菜单项可以是编译命令、shell、终端、gdb、xterm，或任意 Elisp。
+
+---
+
+* 1. 它解决什么问题
+
+在工程根目录写一个 =.menu.org=：
+
+#+begin_src org
+* Build
+ make -j8
+* Debug #gdb
+ ./an out.bin
+* 工具
+** 打开笔记 #eval
+(find-file (mynotename))
+#+end_src
+
+Emacs 菜单栏就出现 =Build= / =Debug= / =工具= 三个菜单，点一下就跑对应命令。
+修改 =.menu.org= 后点 /projmenu ▸ Reload Menu/ 即刻生效，无需重启 Emacs。
+
+另有一个与 =.menu.org= 无关、*无条件显示*的顶层菜单 =projmenu=，承载全部公共项
+（Modes / Project files / Projects / Project history / Reload …，见 §7）；
+=.menu.org= 定义的菜单里*不会*再混入公共项。=.menu.org= 一个菜单项都没有时，
+菜单栏上只有 =projmenu= 和一个 =myhelp= 帮助菜单（=myhelp= 也不含公共项）。
+
+---
+
+* 2. 安装与加载
+
+依赖：=org=、=easymenu=（内置）、=evil=（文件末尾使用 =evil-define-command=，*必须先加载 evil*）。
+
+在 =init.el= 末尾：
+
+#+begin_src elisp
+(let ((p (expand-file-name "./mytool/projmenu/.proj.el" user-emacs-directory)))
+  (when (file-exists-p p) (load p)))
+#+end_src
+
+=.proj.el= 加载时会：
+
+1. 注册 =kill-emacs-hook=，退出时保存所有工程的文件状态；
+2. 定义 =C-z= / =C-x j= 前缀下的 =p ...= 系列快捷键（见 §10）；
+3. 调用 =(proj-rebuild-menu-from-org)= 构建菜单。
+
+> 状态文件*不再*在加载时一次性读入内存：保存与恢复都实时读盘，只修改当前项目对应的 key（见 §8）。
+> 因此多开 Emacs 时不会互相覆盖其它项目状态。
+
+它需要两个模板文件（=ls-proj-defmenu= / =ls-proj-genmenu= 会用到）：
+
+- =~/.emacs.d/mytool/projmenu/.menu.org= —— 默认菜单模板（内部用 =#+INCLUDE= 拆到 =.tools.org=）
+- =~/.emacs.d/mytool/projmenu/.proj.el= —— 本文件
+
+---
+
+* 3. 两个基本概念
+
+** 3.1 两个目录：项目目录与文件根目录
+
+=.proj.el= 维护两个"当前目录"，含义不同：
+
+| 变量 | 含义 | 由什么决定 |
+|---|---|---|
+| =proj-el-dir= | 项目目录：=.menu.org= 所在目录 | =.menu.org= 位置 / =Change project= |
+| =proj-project-root= | 文件根目录：项目文件的扫描 / 保存 / 恢复根 | =.menu.org= 第一行 =#+proj:=；未指定时 =proj-el-dir= |
+
+- /History 与 Projects 归组、状态 key/ 一律用 =proj-el-dir=；
+- /=Project files= 子菜单、状态保存 / 恢复的文件列表/ 用 =proj-project-root=。
+
+=proj-el-dir= 初始化顺序：
+
+1. 加载 =.proj.el= 时若 =buffer-file-name= 非空，则从该文件所在目录向上找 =.menu.org=；
+2. 否则从 =default-directory= 向上找 =.menu.org=（用 =load= 从 =init.el= 加载时 =buffer-file-name= 为 =nil=，实际上就是从 =~/.emacs.d= 开始找）；
+3. 都没有则用 =default-directory=。
+
+之后可用 /projmenu ▸ Change project/（=ls-proj-set=）或 =my-proj-switch= 切换：
+
+#+begin_src elisp
+M-x ls-proj-set                 ; 交互选目录
+:my-proj-switch /path/to        ; evil 命令行（选目录或 .menu.org 均可）
+#+end_src
+
+切换时会：保存旧项目打开的文件 → 清理缓存 → 切目录（同时按新 =.menu.org= 的 =#+proj:= 刷新 =proj-project-root=）→ 恢复新项目上次打开的文件 → 重建菜单。
+
+** 3.2 =.menu.org=
+
+放在项目根目录。菜单标题 = Org 一级标题；层级 = 菜单层级。
+
+=.menu.org= 里的每个一级标题各自成为一个独立顶层菜单，只包含你自己写的项。
+
+=.menu.org= 第一行可以写：
+
+#+begin_example
+#+proj: /loongson/pmon-loongson
+#+end_example
+
+用于把"项目文件根目录"（=proj-project-root=）与"菜单所在目录"分离。未指定时两者相同。
+相对路径按 =.menu.org= 所在目录解析；空值视为未指定；只读第一行（前 4096 字节），
+include 文件里的 =#+proj:= 不生效。
+
+当没有 =.menu.org=、或文件里没有任何"带命令正文的 heading"时，=proj-rebuild-menu-from-org= 会回退到 =proj--default-menu-tree=，即菜单栏上额外出现一个顶层菜单 =myhelp=：
+
+#+begin_example
+myhelp ▸
+  project menu install help      ; 打开 readme.txt
+  project menu usage help        ; 打开 proj-readme.org
+  then copy default menu         ; ls-proj-genmenu
+  or use default menu            ; ls-proj-defmenu
+#+end_example
+
+它用来在首次接触时引导安装 / 生成 / 使用默认菜单，不是"空菜单"。
+此时 =projmenu= 依然存在（无条件显示），只是 =.menu.org= 自己的顶层菜单一个都不建。
+=myhelp= 里*不含* Modes / Project files / Projects / Project history 等公共项，那些都在 =projmenu= 里。
+
+> 判别方式是"至少有一个顶层菜单带 items"：只要有一条真正的命令正文，就不再出现 =myhelp=。
+
+---
+
+** 4. =.menu.org= 语法
+
+*** 4.1 标题与注释（执行模式）
+
+#+begin_src org
+* build
+** compile
+ make
+** compile in shell #shell
+ make
+#+end_src
+
+- =* compile= → 菜单项名 =compile=，命令体是标题下的正文。
+- 注释用 = #= 分隔（="/# /"=），即 =# shell=、=#shell=、=# eval= 都行。
+- 注释里第一个词决定*执行模式*（见 §5），后面的逗号参数是该模式的参数。
+
+标题里的 =#gdb/#term/#eval= 等写在标题后，*不属于命令内容*。
+
+** 4.2 属性
+
+在标题下、命令正文之前写：
+
+#+begin_src org
+* debugger
+#+workdir: $debuggerpath
+#+path: $debuggerpath
+ make
+#+end_src
+
+| 属性 | 作用 |
+|---|---|
+| =#+workdir:= | 命令执行目录；若给的是文件路径则自动取其目录。默认用 =proj-el-dir= |
+| =#+path:= | *前置*到 =PATH= 与 =exec-path=（多路径用 =path-separator=：Linux =:=，Windows =;=） |
+| =#+rawcmd: 1= | *禁止* =$VAR= / =${{…}}= 展开，命令原样执行 |
+| 任意 =#+xxx:= | 都会进入属性表（可被继承） |
+
+属性值本身在解析阶段会做一次 =$VAR= 展开（用全局 Elisp 变量 / 系统环境变量）。
+
+> 例外：=#+proj:= 只在文件*第一行*有效，用于指定项目文件根目录（见 §3.1），
+> 不作为普通属性、不被继承。
+
+** 4.3 属性继承
+
+按 Org 层级向下继承，子级同名属性覆盖父级：
+
+#+begin_src org
+* build
+#+workdir: /src/pmon
+ make                 ; 在 /src/pmon 里执行
+** clean
+ make clean           ; 同样继承 /src/pmon
+** cleanall
+#+workdir: /tmp
+ make cleanall        ; 覆盖为 /tmp
+#+end_src
+
+规则：取"层级比当前小、且层级最大的那个祖先"的属性表合并（=proj-merge-props=）。
+
+** 4.4 多行命令
+
+标题下的正文（跳过空行、=#+= 行与 =# = 开头的 org 注释行）直到下一个 =*= 全属该命令，多行原样保留：
+
+#+begin_src org
+** run debugger cmd
+$debuggerpath cpus 10
+$debuggerpath stop
+#+end_src
+
+shell 会把整段作为一次输入。被 =#+INCLUDE= 展开进文件头的注释块不会拼进上一项的 cmd。
+
+** 4.5 前言 Elisp（=#+begin_src elisp=）
+
+文件开头、*第一个 heading 之前*的 elisp 代码块会在解析菜单前执行，可用来定义 =defcustom=、辅助函数：
+
+#+begin_example
+#+begin_src elisp
+  (defcustom gdbprog "/usr/bin/gdb"
+    "Path to gdb tool." :type 'string :group 'my)
+  (defcustom debuggerpath "/path/to/la_dbg_tool_usb"
+    "Path to the EJTAG debugger tool." :type 'string :group 'my)
+#+end_src
+#+end_example
+
+- 允许多个块；
+- =#+begin_src elisp :results silent= 这类参数会被忽略地容忍；
+- 单个块报错只打印消息，不中断菜单构建；
+- *按文件执行*：主文件与每个被 =#+INCLUDE= 的文件各自第一个 heading 之前的编码块都会先执行，与 =#+INCLUDE= 放在文件哪个位置无关（见 §4.7）。
+
+于是命令里就能写 =$gdbprog=、=$debuggerpath=（见 §6）。
+
+** 4.6 模板里的 =#+rawcmd= 备注
+
+建议在 =.menu.org= 顶部写注释说明（模板已自带），例如：
+
+#+begin_src org
+# * title #gdb/#term/#pterm#xterm#eval
+# #+workdir: cmd's workdir
+# #+path: path add to path env
+# #+rawcmd: 0 or 1
+# cmd
+# # exec cmd use compile, gdb(#gdb), term(#term), process term(#pterm),
+# # shell(#shell), process shell(#pshell), xterm(#xterm), elisp(#eval), eshell(#eshell)
+#+end_src
+
+** 4.7 拆分文件（=#+INCLUDE=）
+
+菜单可以拆到多个文件，在主文件里写：
+
+#+begin_src org
+#+INCLUDE: .tools.org
+#+INCLUDE: "~/my/menu2.org"
+#+end_src
+
+- 相对路径相对*当前 =.menu.org= 所在目录*解析；
+- 支持递归包含与循环保护（重复 / 自身包含会被跳过并打消息）；
+- 被包含文件的内容在解析前*就地展开*，展开位置 = 写了 =#+INCLUDE= 的位置；
+- *每个文件*（主文件 + 每个 include 文件）第一个 heading 之前的 =#+begin_src elisp/emacs-lisp= 前言都会先执行，与 include 放在文件哪个位置无关；
+- 被包含文件不必是 =org= 后缀；=:lines= 等后缀参数会被忽略；
+- 文件不存在或深度过大（>16 层）时返回空串并打 =[proj.el] include …= 消息，不打断菜单构建。
+
+例：模板 =.menu.org= 末尾的 =#+INCLUDE: ~/.emacs.d/mytool/projmenu/.tools.org= 把 debugger / msys2 / gdb / myhelp 等菜单整体拆进了 =.tools.org=，同时 =.tools.org= 头部的 =defcustom= 也被一次性执行。
+
+---
+
+* 5. 执行模式一览
+
+注释词 → 使用的函数：
+
+| 注释 | 行为 | 可带参数（逗号分隔） |
+|---|---|---|
+| /无/ | =compile=（=*compilation*= + comint，可跳错） | — |
+| =#shell= | =my-shell=，=shell= 缓冲 | =,<缓冲名>,<autoclose>= |
+| =#pshell= | =my-pshell=，向已存在进程发命令 | =,<缓冲名>,<启动命令>,<autoclose>= |
+| =#term= | =my-term=，真实终端 | =,<终端名>,<autoclose>= |
+| =#pterm= | =my-pterm=，常驻终端 | =,<终端名>,<启动命令>,<autoclose>= |
+| =#xterm= | =my-xterm=，外部终端窗口（Linux 依次尝试 terminator / gnome-terminal / x-terminal-emulator；Windows 用 =cmd.exe /c start=） | — |
+| =#eshell= | =my-eshell=，在 eshell 里插入并执行 | =,<编号>= |
+| =#gdb= | =my-gdb=，=gdb= + =gud=，命令填入 =gud-gdb-history= | — |
+| =#eval= | 对正文逐表达式 =eval=（=default-directory= 已设为工作目录，命令*不*做变量展开） | — |
+
+细节：
+
+- =#gdb= 与 =#eval= *不会*弹 "cmd:" 让你确认；
+- 其余模式执行前都会用 =read-shell-command "cmd:"= 让你确认/修改命令，*直接回车即执行*；
+- =edit before run= 开关（=projmenu ▸ Modes ▸ edit before run= / 变量 =proj-edit-before-run=）关掉后，上述 =cmd:= 提示也会关闭；
+- =#eval= 与 =#+rawcmd: 1= 一样，*不做* =$VAR= / =${{…}}= 展开；
+- 终端名默认 =term%d= / =shell%d=，=%d= 取自 =current-prefix-arg=，所以带前缀点击可得到不同编号的终端；
+- =autoclose= 非空表示进程结束不弹确认，直接 =kill-buffer=；
+- 执行前会分别对 =shell-file-name= / =explicit-shell-file-name= 各 toggle 一次（=proj-toggle-shell-bash=，不是"强制设为 bash"），且执行后*不恢复*，参见 §12。
+
+示例：
+
+#+begin_src org
+** compile in shell #shell
+ make
+** debugger client #pshell
+ telnet 127.0.0.1 8881
+** start debugger #xterm
+ $debuggerpath -E '$ldbcfg'
+** quitgdb # eval
+ (require 'gud)
+ (kill-buffer gud-comint-buffer)
+#+end_src
+
+---
+
+* 6. 变量展开
+
+当 not =#eval=、not =#+rawcmd: 1= 时，命令会先做两轮展开：
+
+** 6.1 =$VAR=
+
+优先级：
+
+1. 内部 alist（=projdir= / =workdir= 等）；
+2. *全局* Elisp 变量（=(boundp)= 且非 buffer-local，取 =symbol-value=，如 =gdbprog=、=ldbelf=、=proj-el-dir=）；
+3. 系统环境变量；
+4. 都找不到 → 原样保留。
+
+#+begin_src org
+$gdbprog -i=mi $ldbelf -ex "set non-stop 0" $gdbport
+#+end_src
+
+> 注意：=${VAR}= 这种花括号写法*不*支持；变量名只允许 =[a-zA-Z0-9_-]+=。
+
+内置可用名：
+
+| 名字 | 含义 |
+|---|---|
+| =$projdir= / =$PROJDIR= | 当前项目目录 =proj-el-dir=（前者走 alist，后者走 =setenv=） |
+| =$workdir= / =$WORKDIR= | 命令实际执行目录（workdir 属性或项目目录） |
+
+** 6.2 =${{EXPR}}=
+
+求值任意 Elisp，结果 =prin1= 后替换（字符串原样）：
+
+#+begin_src org
+$debuggerpath putelf ${{(customize-save-variable 'ldbelf
+                        (read-file-name "elffile: " workdir ldbelf t ldbelf))}}\;go
+#+end_src
+
+注意：
+
+- =;= 在 =${{…}}= 字符串之外会被 shell 当命令分隔符。要让 =;= *作为参数*传给被测程序（如 EJTAG debugger），写成 =\;=；
+- 展开*先于*命令执行，因此 =${{…}}= 里的交互式输入会在点击菜单时立即弹出；
+- 在 =#eval= / =${{…}}= 中 =projdir=、=workdir= 是 =mycompile= 的内部局部变量，*不保证可见*。推荐用 =default-directory=、=proj-el-dir= 或 =(getenv "PROJDIR")= / =(getenv "WORKDIR")=。
+
+** 6.3 =#+rawcmd: 1= / =#eval= 的场景
+
+命令本身要用 =$=（如 awk、正则、shell 变量），不希望被 Elisp 吃掉：
+
+#+begin_src org
+** 统计行数
+#+rawcmd: 1
+awk '{print $1}' file | sort | uniq -c
+#+end_src
+
+=#eval= 模式的正文一样*不*做 =$VAR= / =${{…}}= 展开，直接 =eval=。
+
+---
+
+* 7. 菜单栏结构
+
+菜单栏上最多两块，*互不混入*：
+
+1. =projmenu= —— 本包的公共菜单，*无条件显示*，与 =.menu.org= 无关；
+2. =.menu.org= 定义的顶层菜单 —— 每个一级标题一个，只包含你自己写的项。
+
+=.menu.org= 一个菜单项都没有时（缺失 / 无 heading / 所有 heading 下都没有命令正文），
+额外出现顶层菜单 =myhelp=（引导用，同样不含公共项）。
+
+** 7.1 projmenu（公共项，无条件）
+
+#+begin_example
+projmenu ▸
+  ───
+  Modes ▸
+     evil Mode                ; evil-mode 开关
+     CUA Mode                 ; cua-mode 开关
+     Debug on Error           ; debug-on-error 开关
+     compile in newwin        ; 每次 compile 使用新的 *compilation* buffer
+     edit before run          ; 关掉后不再弹 "cmd:" 提示
+     bash                     ; Windows 上切换 shell-file-name 到 bash（其它平台 :active nil，仅展示）
+     bash all                 ; 同上，针对 explicit-shell-file-name
+  ───
+  Reload Menu                 ; 重新读取并构建（会保存当前项目文件状态）
+  open menu                   ; 打开当前 .menu.org（不覆盖）
+  generate/open menu          ; 用默认模板覆盖生成 .menu.org 并打开
+  use default menu            ; 直接切到默认模板菜单
+  ───
+  Project: /path/to/project   ; 只读显示（当前 proj-el-dir）
+  Change project              ; 选目录并切换项目
+  open project file           ; 在项目里选文件打开
+  Project files ▸             ; 动态：当前项目文件根目录下已打开的 buffer
+  Projects ▸                  ; 动态：按 .menu.org 归组的所有打开 buffer
+  Project history ▸           ; 最近 10 个项目，一键切换
+#+end_example
+
+这些项*只*出现在 =projmenu= 里，*不会*追加到 =.menu.org= 的菜单末尾；
+重建菜单时会先清掉本包上次创建的菜单符号，再重建全部。
+
+** 7.2 .menu.org 菜单与 myhelp
+
+- 每个一级标题 = 一个顶层菜单，子标题 = 子菜单，只含你自己写的命令项；
+- 没有任何菜单项时，回退到 =myhelp=（见 §3.2），此时菜单栏 = =projmenu= + =myhelp=。
+
+** 7.3 Project files（在 projmenu 下）
+
+列出 =proj-project-root=（=#+proj:= 指定的目录；未指定时 =proj-el-dir=）下所有已打开文件（递归子目录，忽略 =TAGS=/=tags=）：
+
+#+begin_example
+projmenu ▸ Project files ▸
+  Open all files
+  ───
+  main.c
+  Makefile
+  ───
+  Close all other files        ; 关闭非本项目 buffer，需确认
+#+end_example
+
+** 7.4 Projects（在 projmenu 下）
+
+按"文件向上最近的含 =.menu.org= 的目录"归组所有已打开 buffer。归组依据仍是
+=.menu.org= 所在目录，*不*受 =#+proj:= 影响。每组：
+
+#+begin_example
+projmenu ▸ Projects ▸ <工程名> ▸
+  open project files          ; 依次访问该工程所有 buffer
+  ───
+  main.c
+  ───
+  close this project files    ; 关闭该工程目录下所有 buffer（需确认；不保存状态）
+  switch to this project      ; 切到该工程并恢复上次打开的文件（会读取它的 #+proj:）
+#+end_example
+
+- 组名用目录最后一级名，重名则退化为缩写路径；
+- 没有归属的 buffer 进 =noproject= 组，其中 =switch to this project= 为禁用；
+- 每次打开这个子菜单时*实时*刷新（=:filter=）。
+
+** 7.5 Project history（在 projmenu 下）
+
+- 每次重建菜单 / 切换项目时把当前项目压入历史（去重、最多 =proj-history-max==10）；
+- 变化时 =customize-save-variable= 落到 =custom-file=，重启仍在；
+- =Clear history= 清空并重建。
+
+** 7.6 右键菜单（context menu，Emacs 28+）
+
+开启 =context-menu-mode= 后，=proj-context-menu= 会把菜单栏上的每个顶层菜单
+（=projmenu= 与 =.menu.org= 各菜单）原样挂进右键菜单，公共项同样归在 =projmenu= 分组里。
+Emacs 28 以下没有 =context-menu-functions=，此功能自动不启用。
+
+---
+
+* 8. 项目文件状态持久化
+
+保存"某个项目上次打开了哪些文件"，切走再切回自动恢复。
+
+- 状态文件：=~/.emacs.d/.proj-state.el=
+- 结构：=(("=.menu.org= 所在目录/" . ("文件绝对路径" ...)) ...)=
+  - *key* 是 =.menu.org= 所在目录（=proj-el-dir=），规范化成绝对路径 + 尾 =/=；
+  - *value* 是扫描 =#+proj:= 指定目录（未指定时 =proj-el-dir=）得到的已打开文件绝对路径列表，不含 =TAGS=/=tags=。
+- *保存时机*
+  - =proj-rebuild-menu-from-org= 开头（点 Reload / 切项目 / 改 .menu.org 后都会触发）
+  - =proj--switch-to-project= 切换前（保存旧项目）
+  - =kill-emacs-hook= 退出时（遍历 =Projects= 的组 + 当前项目）
+- *恢复时机*
+  - 切换到某项目时用 =find-file-noselect= 批量打开（不存在或报错的文件跳过）
+- *不保存时机*
+  - =close this project files= / =Close all other files= 关闭时故意不保存，这样关闭后切走再切回仍能恢复关闭前的文件列表。
+- *并发安全*
+  - 内存里不缓存整个状态；每次写盘前先读取磁盘现有内容，只替换当前项目的 key，再用临时文件 + =rename= 原子写回；
+  - 因此多开 Emacs 时不会互相覆盖其它项目状态。
+
+> 想彻底重置：杀掉 Emacs 后删除 =~/.emacs.d/.proj-state.el=。
+
+---
+
+* 9. 以命令方式调用菜单项
+
+不用鼠标，从 =M-x= 直接调用菜单项。*支持任意深度*子菜单，用 =/= 分隔路径：
+
+#+begin_src elisp
+(proj-call-menu-item "build" "compile")                  ; 顶层 build → compile
+(proj-call-menu-item "gdb"   "run gdb")
+(proj-call-menu-item "debugger" "run cmds/go")           ; 任意深度
+(proj-call-menu-item "debugger" '("run cmds/go"))        ; 标题本身含 /：直接传列表
+(proj-call-menu-item "projmenu" "Reload Menu")           ; 公共菜单也一样
+#+end_src
+
+要点：
+
+- 若某级标题本身含 =/=，可写成 ="a\/b/c"= 转义，或直接传标题列表避免歧义；
+- 未转义时用「最长前缀优先 + 回溯」解析，仍能命中含 =/= 的标题；
+- =Project files= / =Projects= 这类 =:filter= 动态子菜单在调用时*现场求值*，也会出现在路径解析与补全中；
+- *交互式*选择（=M-x proj-call-menu-item=）先列顶层菜单（含 =projmenu= / =myhelp=），再只列叶子（可执行）菜单项，含 =/= 的标题自动转义；
+- 只给到子菜单会报错："is a submenu, not a command; specify a fuller path"。
+
+evil 命令行里更省事：
+
+#+begin_example
+:call my-proj-call build/compile
+:call my-proj-call debugger/run cmds/go
+:call my-proj-call projmenu/Reload Menu
+#+end_example
+
+实现上，它把路径拆回标题列表（必要时用回溯解决歧义），遍历 easy-menu 生成的 keymap 找到 =menu-item= 的 callback 后 =call-interactively=。
+
+---
+
+* 10. 与 evil 的集成
+
+=.proj.el= 定义了两个 evil 命令：
+
+| 命令 | 参数 | 用途 |
+|---|---|---|
+| =my-proj-switch= | =<f>= 文件 | 切到某个 =.menu.org= 所在项目（传目录也接受） |
+| =my-proj-call= | =<a>= 字符串 | ="菜单/菜单项/..."= 任意深度路径调用 |
+
+#+begin_example
+:call my-proj-switch /path/to/other/.menu.org
+:call my-proj-call build/compile
+:call my-proj-call debugger/run cmds/go
+#+end_example
+
+不带参数时二者都会落到交互式补全。
+
+=my-proj-call= 上次成功调用的路径会记在 =my-proj-call--last=，用前缀 =C-u= 再调一次即可重复：
+
+#+begin_example
+:call my-proj-call        ; 交互
+C-u :call my-proj-call    ; 重复上次
+#+end_example
+
+=proj-call-menu-item= 成功执行后也会刷新 =my-proj-call--last=。
+
+加载时还会在 =C-z= 与 =C-x j= 两个前缀下都绑定这些键：
+
+| 键（前缀 +） | 命令 | 说明 |
+|---|---|---|
+| =p c= | =my-proj-call= | 按路径调用菜单项 |
+| =p b= | =(lambda () (interactive) (my-proj-call my-proj-call--last))= | 重复上次菜单调用 |
+| =p s= | =my-proj-switch= | 切换项目 |
+| =p S= | =ls-proj-set= | 交互切目录 |
+| =p o= | =ls-proj-openmenu= | 打开（不覆盖）.menu.org |
+| =p m= | =ls-proj-genmenu= | 生成并打开 .menu.org |
+| =p O= | =proj--open-all-project-files= | 依次打开项目内已打开文件 |
+| =p r= | =proj-rebuild-menu-from-org= | 重建菜单 |
+| =p R= | =ls-proj-defmenu= | 使用默认模板菜单 |
+| =p C= | =proj--close-all-other-files= | 关闭非本项目 buffer |
+| =p f= | =ls-proj-openfile= | 打开项目内文件 |
+
+---
+
+* 11. 典型工作流（对应 readme.txt）
+
+1. *首次进入一个工程*：=projmenu ▸ Change project= 选目录 → =projmenu ▸ generate/open menu= 生成 =.menu.org= 并打开。
+2. *改菜单*：直接编辑 =.menu.org=（Org 折叠、注释、结构随便用）→ =projmenu ▸ Reload Menu=。
+3. *跑编译*：=build ▸ compile=（进 =*compilation*=，出错可跳转）；需要终端交互就用 =#shell= / =#term=。
+4. *调试 Loongson*（模板中的 debugger 菜单）
+   - =debugger ▸ set debugger tool= 选 =la_dbg_tool_usb= / =la32_dbg_tool_usb= / =ejtag_debug_usb=
+   - =debugger ▸ start debugger server= 启动服务（=#xterm= 外部窗口）
+   - =debugger ▸ start debugger client= 用 telnet 连 =127.0.0.1 8881= 交互
+   - 其余 =read jtagid= / =run cmds= / =flash cmds= 等直接点即可
+   - 普通用户访问 USB：把 =loongson-debugger/scripts/udev/90-jtag.rules= 拷到 =/etc/udev/rules.d/=
+5. *gdb*：=gdb ▸ set gdb tool= / =set gdb port= / =select elffile= → =run gdb=（模板已把 =gdb-many-windows=、反汇编、locals 布局成习惯的样子）。
+6. *多工程并存*：打开几个工程的文件后，=projmenu ▸ Projects ▸= 里按工程分组；=switch to this project= 一键切上下文，=projmenu ▸ Project history ▸= 回到最近的项目。
+7. *AI*：
+   - =myhelp ▸ ai with menu=（模板菜单，=gptel-menu=）
+   - =myhelp ▸ ai with default model=（=gptel= 直接开始）
+   - =myhelp ▸ modelscope autoconfig=（若加载了 =~/.emacs.d/modelscope-gptel.el=）
+
+   =init.el= 里的 gptel 配置：
+
+   * 后端名 /ModelScope/，=host= =api-inference.modelscope.cn=，=endpoint= =/v1/chat/completions=，=stream t=；
+   * 模型列表来自环境变量 =MODELSCOPE_MODELS=（空格分隔），缺省为内置的 DeepSeek / Qwen / GLM / Step / MiniMax 列表；=gptel-model= 取列表中第一个；
+   * 默认密钥来自环境变量 =MODELSCOPE_API_KEY=（=ms-...=），未设置就调不通；
+   * 另注册了 Ollama 后端，=OLLAMA_HOST= / =OLLAMA_MODELS= 可覆盖；
+   * 对话内容会追加写入 =~/.gptel-log.org=；流式响应 buffer 里的 undo-tree 会被关掉（否则内存暴涨）。
+
+---
+
+* 12. 注意事项与坑
+
+- *=.menu.org= 位置决定项目目录*：=Projects= 归组、=proj-el-dir= 初值都靠它；没有它就只能用 =projmenu ▸ Change project= 手动指定。
+- *文件根目录由 =#+proj:= 决定*：只在 =.menu.org= 第一行有效，相对路径相对 =.menu.org= 目录解析；它*只*改变 =Project files= 的扫描根和状态保存/恢复用的文件列表，*不*影响 =Projects= 归组和 History。
+- *只有一个"当前项目"*：=proj-el-dir= 是全局变量，=Project files= 只反映它里面的文件。
+- *公共项只有一份*：=Modes= / =Project files= / =Projects= / =Project history= / Reload 等只在 =projmenu= 里；=.menu.org= 的菜单里不会再出现，别在模板里重复定义同名管理项。
+- *顶层标题别和公共菜单重名*：叫 =projmenu= 会覆盖公共菜单（=proj--install-menu= 用同名 key 覆盖）；叫 =myhelp= 会和回退帮助菜单同名冲突。两者都请避开。
+- *=#eval= / =#gdb= 不确认命令*，其余模式会弹 "cmd:" 让你改（直接回车即可，可用 =projmenu ▸ Modes ▸ edit before run= 全局禁用）；多行命令会整段交给 shell。
+- *执行前会 toggle shell*：每次执行菜单命令前，会对 =shell-file-name= 与 =explicit-shell-file-name= 各 toggle 一次（不是"强制设为 bash"），且执行后不恢复。
+  - 默认 =cmdproxy.exe= 被切到 bash；
+  - 如果已经是 bash，则反而被切回 =cmdproxy.exe=；
+  - 觉得不对时用 =projmenu ▸ Modes ▸ bash= / =bash all= 手动切回。
+  Windows 上请确保 =executable-find "bash.exe"= 能命中（init.el 里配置了 git 的 =usr/bin=）。
+- *=PATH= / =exec-path= 会恢复，=WORKDIR= / =PROJDIR= 不会*；=shell-file-name= 也不恢复。需要干净环境请自己 =unwind-protect=。
+- *=#eval= 不做变量展开*：正文原样 =eval=，需要 =$VAR= 请自己 =(getenv "…")= / 全局变量。
+- *=$VAR= 用全局变量*：lexical-binding 下的 =let= 局部变量、buffer-local 变量都取不到；=${VAR}= 不识别。
+- *=${{…}}= 在点击菜单时立即求值*，含 =read-file-name= / =read-string= 的表达式会把菜单点击变成一次输入流程（这正是模板里 "select elffile" 的用法）。
+- *前言 elisp 每次重建都执行*：=customize-save-variable= 会持久化到 =custom-file=，重启后仍生效。
+- *=#+INCLUDE= 按文件执行前言*：主文件和每个被 include 的文件，各自第一个 heading 之前的 elisp 块都会在解析菜单前顺序执行。
+- *=.proj.el= 依赖 evil*：文件末尾直接 =evil-define-command=，evil 未加载会报错，请保证加载顺序。
+- *=TAGS= / =tags= 永远被忽略*，不会出现在文件列表、也不会被项目关闭逻辑统计。
+- *菜单标题是全局符号*：两个不同 =.menu.org= 用同一标题会互相覆盖（重建前会先清理本包创建过的符号）。
+- *状态文件是 =read= 的 Elisp 数据*：不要手工塞不可读对象；删掉它即完全重置。
+- *路径固定*：=~/.emacs.d/.proj-state.el=、=~/.emacs.d/mytool/projmenu/.menu.org=，换目录请改 =proj-state-file= / =ls-proj-defmenu= 中的常量。

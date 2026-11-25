@@ -1,0 +1,206 @@
+# * title #gdb/#term/#pterm#xterm#eval
+# #+workdir: cmd's workdir
+# #+path: path add to path env
+# #+rawcmd: 0 or 1
+# cmd
+# # exec cmd use compile, gdb(#gdb), term(#term), process term(#pterm), shell(#shell), process shell(#pshell), xterm(#xterm), elisp(#eval), eshell(#eshell)
+# # exec cmd's curent dir is projdir or workdir or debuggerdir
+# # default cmds expand $var when var is workdir/WORKDIR, projdir/PROJDIR and other envs, global elisp vars.expand ${{var}} to elisp (eval var).
+# # rawcmd props does not expand $var, ${{var}} in cmds
+
+#+begin_src elisp
+  (defcustom gdbprog "/usr/bin/gdb"
+    "Path to gdb tool."
+    :type 'string
+    :group 'your-package-name)
+  (defcustom gdbport "-ex \"target remote :50010\""
+    "gdb server port"
+    :type 'string
+    :group 'your-package-name)
+  (defcustom debuggerpath "/path/to/la_dbg_tool_usb"
+    "Path to the EJTAG debugger tool."
+    :type 'string
+    :group 'your-package-name)
+  (defcustom  ldbcfg "source configs/config.ls2k"
+    "board config"
+    :type 'string
+    :group 'your-package-name)
+  (defcustom ldbelf "pmon.gdb"
+    "elf file for gdb to debug."
+    :type 'string
+    :group 'your-package-name)
+
+  (defcustom ldbrom "zloader/gzrom.bin"
+    "elf file for gdb to debug."
+    :type 'string
+    :group 'your-package-name)
+
+#+end_src
+
+* gdb
+** set gdb tool #eval
+(customize-save-variable 'gdbprog (read-file-name "gdb program: " (file-name-directory gdbprog) gdbprog t gdbprog))
+** set gdb port #eval
+(customize-save-variable 'gdbport (read-string "gdb port param: " gdbport))
+** select elffile #eval
+(customize-save-variable  'ldbelf (read-file-name "elffile: " (if (eq ldbelf "") workdir (file-name-directory ldbelf)) ldbelf t ldbelf))
+** run gdb  #gdb
+$gdbprog -i=mi $ldbelf -ex "set non-stop 0" $gdbport -ex ${{(concat "\"source " (file-name-directory debuggerpath) "scripts/linux.py\"")}}
+** reset gdb #eval
+(gdb-restore-windows)
+** quitgdb # eval
+(require 'gud)
+(kill-buffer gud-comint-buffer)
+* debugger
+#+workdir: $debuggerpath
+#+path: $debuggerpath
+** set debugger tool #eval
+(customize-save-variable 'debuggerpath (read-file-name "debugger program: " (file-name-directory debuggerpath) debuggerpath t debuggerpath))
+(my-proj-switch current-menu-org-file)
+** select config file #eval
+(customize-save-variable  'ldbcfg (concat "source " (read-file-name "config file: " (concat workdir "/" "configs" ) (substring ldbcfg 7) t (substring ldbcfg 7))))
+** start debugger #xterm
+$debuggerpath -E '$ldbcfg'
+** start debugger server #xterm
+$debuggerpath -E '$ldbcfg' -x gdbserver
+** close debugger server
+$debuggerpath exit
+** start debugger client #xterm
+telnet 127.0.0.1 8881
+** run debugger cmd
+$debuggerpath cpus 10
+** log setup
+*** log log.txt
+$debuggerpath log log.txt
+*** log off
+$debuggerpath log
+*** echo on
+$debuggerpath echo_on
+*** echo off
+$debuggerpath echo_off
+** check connection
+*** read jtagid 0x5a5a5a5a/0x20010819
+$debuggerpath loop 100 jtagregs d8 1 1
+*** auto checkjtag
+$debuggerpath check_ejtag
+*** cpus 100
+$debuggerpath cpus 100
+*** check watchdog
+$debuggerpath  set pc\;cpus 10.1\;echo sleep 10s\;msleep 10000\;cpus 10.1
+** set jtag signal voltage
+*** set 3.3v (default)
+$debuggerpath jtag_vol 0x33
+*** set 1.8v
+$debuggerpath jtag_vol 0x18
+*** set 1.2v
+$debuggerpath jtag_vol 0x12
+*** set tristate
+$debuggerpath jtag_vol 0
+** run cmds
+*** stop
+$debuggerpath stop
+*** go
+$debuggerpath go
+*** step
+$debuggerpath si 1
+*** step by hb
+$debuggerpath si.h 1
+*** step by sb
+$debuggerpath si.s 1
+*** reboot
+$debuggerpath reboot
+** breakpoint cmds
+*** hard breakpoint
+$debuggerpath hb cacbase|0x0
+*** hard breakpoint list
+$debuggerpath hbls
+*** soft breakpoint
+$debuggerpath b cacbase|0x0
+** flash cmds
+*** read flash id
+$debuggerpath '
+echo_off
+spi_readid'
+*** spi read area
+$debuggerpath "
+echo_off
+spi_read_area 10 100"
+*** erase
+$debuggerpath "stop;call erase"
+*** readid and erase
+$debuggerpath "stop;echo_off;spi_fifoclear;spi_readid;spi_erase_all"
+*** program cachelock
+$debuggerpath program_cachelock ${{(customize-save-variable 'ldbrom (read-file-name "flash file: " (file-name-directory projdir) ldbrom t ldbrom))}}
+*** read spiflash to memory
+$debuggerpath read_spiflash ucbase|0x04000000 0 0x100000
+** file cmds
+*** put file to memory
+$debuggerpath put $ldbelf 0x9000000004000000
+*** slow put file to memory
+$debuggerpath sput $ldbelf 0x9000000004000000
+*** load elffile to memory
+$debuggerpath putelf ${{(customize-save-variable  'ldbelf (read-file-name "elffile: " (if (eq ldbelf "") workdir (file-name-directory ldbelf)) ldbelf t ldbelf))}}\;go
+*** get memory to file
+$debuggerpath get gzrom-save.bin 0x800000001c000000 0x100000
+*** slow memory to file
+$debuggerpath sget gzrom-save.bin 0x800000001c000000 0x100000
+** reg cmds
+*** read regs
+$debuggerpath set
+*** write reg
+$debuggerpath set zero 0
+*** read csr regs
+$debuggerpath set csr0
+*** read config regs
+$debuggerpath set cfg0
+*** read iocsr
+$debuggerpath set iocsr420
+*** read iocsr byte
+$debuggerpath set iocsr426,1
+** pci cmds
+*** list pci devices
+$debuggerpath pci_list_bus
+*** read pci config
+$debuggerpath pci_config_readv 0 3 0 0 16
+*** write pci config
+$debuggerpath pci_config_write 0 3 0 0 0
+** debug cmds
+*** add symbol
+symbol add $ldbelf
+*** perf top #xterm
+cpus 0 -
+** minicom #xterm
+minicom ttyACM0
+
+** debugger(cmd/to/client mode)
+*** debugger client #pshell
+telnet 127.0.0.1 8881
+*** run debugger cmd #pshell
+cpus 10
+
+* msys2
+** mount nfs
+c:/Windows/system32/mount <NFS_HOST>:/path/to/ejtag i:
+** compile
+#+path: d:/msys64/usr/bin;d:/msys64/bin
+#+workdir: i:/
+./mybuild-msys2.sh
+** compile in linux #shell
+#+workdir: /plink:<user>@<host>:/path/to/pmon-loongson
+./build.sh
+** run gdb in linux #gdb
+#+workdir: /plink:<user>@<host>:/path/to/pmon-loongson
+$gdbprog -i=mi $ldbelf -ex "set non-stop 0" $gdbport -ex ${{(concat "\"source " (file-name-directory debuggerpath) "scripts/linux.py\"")}}
+
+* myhelp
+** project menu install help #eval
+(find-file (expand-file-name "readme.txt" user-emacs-directory))
+** project menu usage help  #eval
+(find-file (expand-file-name "proj-readme.org" user-emacs-directory))
+** modelscope autoconfig #eval
+(modelscope-autoconfig)
+** ai with menu #eval
+(message "-m选择模型,m使用minibuffer输入,g选择session,RET开始ai聊天")
+(gptel-menu)
+** ai with default model#eval
+(call-interactively 'gptel)
